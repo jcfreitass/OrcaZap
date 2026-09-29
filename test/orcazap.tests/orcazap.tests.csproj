@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<TargetFramework>net8.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>disable</Nullable>
+		<IsPackable>false</IsPackable>
+		<RootNamespace>orcazap.tests</RootNamespace>
+	</PropertyGroup>
+	<ItemGroup>
+		<PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.10.0" />
+		<PackageReference Include="Moq" Version="4.20.72" />
+		<PackageReference Include="Moq.AutoMock" Version="3.5.0" />
+		<PackageReference Include="xunit" Version="2.9.0" />
+		<PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+		<PackageReference Include="coverlet.collector" Version="6.0.2" />
+	</ItemGroup>
+	<ItemGroup>
+		<ProjectReference Include="..\..\src\orcazap.core\core.csproj" />
+		<ProjectReference Include="..\..\src\orcazap.user.criar\user.criar.csproj" />
+		<ProjectReference Include="..\..\src\orcazap.user.login\user.login.csproj" />
+		<ProjectReference Include="..\..\src\orcazap.user.listar\user.listar.csproj" />
+		<ProjectReference Include="..\..\src\orcazap.user.consultar\user.consultar.csproj" />
+		<ProjectReference Include="..\..\src\orcazap.customer.criar\customer.criar.csproj" />
+		<ProjectReference Include="..\..\src\orcazap.customer.listar\customer.listar.csproj" />
+		<ProjectReference Include="..\..\src\orcazap.customer.consultar\customer.consultar.csproj" />
+		<ProjectReference Include="..\..\src\orcazap.customer.atualizar\customer.atualizar.csproj" />
+		<ProjectReference Include="..\..\src\orcazap.customer.remover\customer.remover.csproj" />
+		<ProjectReference Include="..\..\src\orcazap.service.criar\service.criar.csproj" />
+		<ProjectReference Include="..\..\src\orcazap.service.listar\service.listar.csproj" />
+		<ProjectReference Include="..\..\src\orcazap.service.consultar\service.consultar.csproj" />
+		<ProjectReference Include="..\..\src\orcazap.service.atualizar\service.atualizar.csproj" />
+		<ProjectReference Include="..\..\src\orcazap.service.remover\service.remover.csproj" />
+		<ProjectReference Include="..\..\src\orcazap.quote.criar\quote.criar.csproj" />
+		<ProjectReference Include="..\..\src\orcazap.quote.listar\quote.listar.csproj" />
+		<ProjectReference Include="..\..\src\orcazap.quote.consultar\quote.consultar.csproj" />
+		<ProjectReference Include="..\..\src\orcazap.quote.atualizar.status\quote.atualizar.status.csproj" />
+		<ProjectReference Include="..\..\src\orcazap.quote.remover\quote.remover.csproj" />
+		<ProjectReference Include="..\..\src\orcazap.quote.whatsapp.link\quote.whatsapp.link.csproj" />
+	</ItemGroup>
+</Project>

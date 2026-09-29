@@ -1,0 +1,22 @@
+# Segredos locais
+.env
+.claude/settings.local.json
+
+# .NET
+bin/
+obj/
+*.user
+.vs/
+TestResults/
+
+# Frontend
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# MySQL portable: versiona só config + schema (binários e dados ficam locais)
+mysql-server/*
+!mysql-server/my.ini
+!mysql-server/schema.sql
+!mysql-server/start-mysql.bat
