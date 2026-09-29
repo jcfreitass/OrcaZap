@@ -20,3 +20,6 @@ mysql-server/*
 !mysql-server/my.ini
 !mysql-server/schema.sql
 !mysql-server/start-mysql.bat
+
+# SAM
+.aws-sam/

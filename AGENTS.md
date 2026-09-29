@@ -32,8 +32,8 @@ dotnet build src/orcazap.customer.criar/customer.criar.csproj
 # testes
 dotnet test test/orcazap.tests/orcazap.tests.csproj
 
-# deploy de uma Lambda (rodado pelo pipeline)
-dotnet lambda deploy-function --config-file aws-lambda-tools-defaults.json  # dentro da pasta do projeto
+# deploy completo na AWS (Lambdas + API Gateway + RDS + front no S3/CloudFront) — ver docs/deploy.md
+./deploy/deploy.ps1 -Env hml
 ```
 
 **Rodar tudo local (dev):**
@@ -69,13 +69,15 @@ src/
 ├── orcazap.customer.{criar,listar,consultar,atualizar,remover}/ 5 Lambdas
 ├── orcazap.service.{criar,listar,consultar,atualizar,remover}/  5 Lambdas
 ├── orcazap.quote.{criar,listar,consultar,atualizar.status,remover,whatsapp.link}/ 6 Lambdas
+│                                        (Lambda nova: adicionar também em cloudformation/orcazap.yaml e no orcazap.local.host)
 └── orcazap.local.host/                  DEV-ONLY — ASP.NET Core minimal API que despacha HTTP → FunctionHandler
                                          das 20 Lambdas (não vai pra prod; existe só pra rodar tudo local)
 test/
 └── orcazap.tests/                       projeto único referenciando os 21 projetos de produção
-frontend/                                Vite + React + TypeScript (SPA que consome http://localhost:5000)
-pipeline/                                Jenkins Groovy (stubs) para build/deploy por Lambda
-cloudformation/                          templates de recursos AWS por ambiente
+frontend/                                Vite + React + TypeScript (SPA; API em VITE_API_URL, default http://localhost:5000)
+pipeline/                                Jenkins Groovy: testes → sam deploy → build do front → S3/CloudFront
+cloudformation/orcazap.yaml              template SAM único (param EnvAlias=hml|prd): Lambdas, API GW, VPC, RDS, S3, CloudFront
+deploy/deploy.ps1                        deploy local equivalente ao pipeline
 mysql-server/                            servidor MySQL portable + schema.sql (fonte da verdade do schema)
 docs/                                    especificações de features (padrão docs/spec/[slug]/)
 ```

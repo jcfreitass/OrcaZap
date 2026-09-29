@@ -1,0 +1,459 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  OrcaZap - stack completa por ambiente (hml/prd): 20 Lambdas .NET 8 atrás de um
+  API Gateway HTTP, RDS MySQL em VPC e frontend React em S3 + CloudFront.
+  Deploy: deploy/deploy.ps1 (local) ou pipeline/orcazap-{hml,prd}-api.groovy (Jenkins).
+
+Metadata:
+  cfn-lint:
+    config:
+      # DbPassword/JwtSecret chegam como parâmetros NoEcho porque o core lê a connection string
+      # pronta de variável de ambiente (ConfigurationManager); não há leitura de Secrets Manager no código.
+      ignore_checks: [W1011]
+
+Parameters:
+  EnvAlias:
+    Type: String
+    AllowedValues: [hml, prd]
+    Description: Ambiente. Vira sufixo dos recursos e stage variable `stageAlias` lida pelo FunctionBase.
+
+  DbUser:
+    Type: String
+    Default: orcazap_admin
+    AllowedPattern: '^[a-zA-Z][a-zA-Z0-9_]{0,15}$'
+
+  DbPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 12
+    # Sem ; ' " / @ ou espaço: quebrariam a connection string ou são proibidos pelo RDS.
+    AllowedPattern: '^[A-Za-z0-9!#$%^&*()_+=.,:~-]+$'
+
+  JwtSecret:
+    Type: String
+    NoEcho: true
+    MinLength: 32
+    Description: Chave HS256 usada pelo JwtService (hex de 64 caracteres recomendado).
+
+  DbInstanceClass:
+    Type: String
+    Default: db.t4g.micro
+
+  AdminCidr:
+    Type: String
+    Default: ''
+    Description: >
+      IP de quem administra o banco (ex. 200.10.20.30/32) para acessar o RDS via DBeaver.
+      Vazio = banco acessível só pelas Lambdas.
+
+Conditions:
+  IsPrd: !Equals [!Ref EnvAlias, prd]
+  HasAdminCidr: !Not [!Equals [!Ref AdminCidr, '']]
+
+Globals:
+  Function:
+    Runtime: dotnet8
+    Architectures: [x86_64]
+    MemorySize: 512
+    Timeout: 30
+    VpcConfig:
+      SecurityGroupIds: [!Ref LambdaSecurityGroup]
+      SubnetIds: [!Ref SubnetA, !Ref SubnetB]
+    Environment:
+      Variables:
+        ASPNETCORE_ENVIRONMENT: !Ref EnvAlias
+        connection_orcazap_mysql_read: !Sub 'Server=${Database.Endpoint.Address};Port=${Database.Endpoint.Port};Database=orcazap;Uid=${DbUser};Pwd=${DbPassword};'
+        connection_orcazap_mysql_write: !Sub 'Server=${Database.Endpoint.Address};Port=${Database.Endpoint.Port};Database=orcazap;Uid=${DbUser};Pwd=${DbPassword};'
+        jwt_secret: !Ref JwtSecret
+
+Resources:
+  # ---------------------------------------------------------------- Rede
+  # Subnets com rota para a internet só para o RDS poder ser público quando AdminCidr
+  # é informado. As Lambdas não recebem IP público: falam com o RDS e nada mais
+  # (não precisam de NAT, que custaria ~US$ 32/mês).
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.20.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: !Sub 'orcazap-${EnvAlias}' }]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+
+  SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+
+  SubnetARouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetA
+      RouteTableId: !Ref RouteTable
+
+  SubnetBRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetB
+      RouteTableId: !Ref RouteTable
+
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub 'orcazap-${EnvAlias} Lambdas'
+      VpcId: !Ref Vpc
+
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub 'orcazap-${EnvAlias} MySQL'
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
+        - !If
+          - HasAdminCidr
+          - IpProtocol: tcp
+            FromPort: 3306
+            ToPort: 3306
+            CidrIp: !Ref AdminCidr
+          - !Ref AWS::NoValue
+
+  # ---------------------------------------------------------------- Banco
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub 'orcazap-${EnvAlias}'
+      SubnetIds: [!Ref SubnetA, !Ref SubnetB]
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub 'orcazap-${EnvAlias}'
+      Engine: mysql
+      EngineVersion: '8.4.9' # mesma versão do mysql-server local
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: '20'
+      StorageType: gp3
+      StorageEncrypted: true
+      DBName: orcazap
+      MasterUsername: !Ref DbUser
+      MasterUserPassword: !Ref DbPassword
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      VPCSecurityGroups: [!Ref DatabaseSecurityGroup]
+      PubliclyAccessible: !If [HasAdminCidr, true, false]
+      MultiAZ: false
+      BackupRetentionPeriod: !If [IsPrd, 7, 1]
+      DeletionProtection: !If [IsPrd, true, false]
+
+  # ---------------------------------------------------------------- Frontend
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+
+  FrontendOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub 'orcazap-frontend-${EnvAlias}'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: !Sub 'orcazap-frontend-${EnvAlias}'
+        Enabled: true
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: frontend-s3
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt FrontendOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: frontend-s3
+          ViewerProtocolPolicy: redirect-to-https
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 # Managed-CachingOptimized
+        # SPA: qualquer caminho desconhecido devolve o index.html.
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: cloudfront.amazonaws.com }
+            Action: s3:GetObject
+            Resource: !Sub '${FrontendBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}'
+
+  # ---------------------------------------------------------------- API
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Name: !Sub 'orcazap-api-${EnvAlias}'
+      StageVariables:
+        stageAlias: !Ref EnvAlias
+      CorsConfiguration:
+        AllowOrigins:
+          - !Sub 'https://${FrontendDistribution.DomainName}'
+        AllowHeaders: [Content-Type, Authorization]
+        AllowMethods: [GET, POST, PUT, DELETE, OPTIONS]
+        MaxAge: 600
+
+  # Users
+  UserCriarFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lambda-orcazap-user-criar-${EnvAlias}'
+      CodeUri: ../src/orcazap.user.criar/
+      Handler: user.criar::orcazap.user.criar.Function::FunctionHandler
+      Events:
+        Api: { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Method: POST, Path: /api/users } }
+
+  UserLoginFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lambda-orcazap-user-login-${EnvAlias}'
+      CodeUri: ../src/orcazap.user.login/
+      Handler: user.login::orcazap.user.login.Function::FunctionHandler
+      Events:
+        Api: { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Method: POST, Path: /api/users/login } }
+
+  UserListarFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lambda-orcazap-user-listar-${EnvAlias}'
+      CodeUri: ../src/orcazap.user.listar/
+      Handler: user.listar::orcazap.user.listar.Function::FunctionHandler
+      Events:
+        Api: { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Method: GET, Path: /api/users } }
+
+  UserConsultarFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lambda-orcazap-user-consultar-${EnvAlias}'
+      CodeUri: ../src/orcazap.user.consultar/
+      Handler: user.consultar::orcazap.user.consultar.Function::FunctionHandler
+      Events:
+        Api: { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Method: GET, Path: '/api/users/{id}' } }
+
+  # Customers
+  CustomerCriarFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lambda-orcazap-customer-criar-${EnvAlias}'
+      CodeUri: ../src/orcazap.customer.criar/
+      Handler: customer.criar::orcazap.customer.criar.Function::FunctionHandler
+      Events:
+        Api: { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Method: POST, Path: /api/customers } }
+
+  CustomerListarFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lambda-orcazap-customer-listar-${EnvAlias}'
+      CodeUri: ../src/orcazap.customer.listar/
+      Handler: customer.listar::orcazap.customer.listar.Function::FunctionHandler
+      Events:
+        Api: { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Method: GET, Path: /api/customers } }
+
+  CustomerConsultarFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lambda-orcazap-customer-consultar-${EnvAlias}'
+      CodeUri: ../src/orcazap.customer.consultar/
+      Handler: customer.consultar::orcazap.customer.consultar.Function::FunctionHandler
+      Events:
+        Api: { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Method: GET, Path: '/api/customers/{id}' } }
+
+  CustomerAtualizarFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lambda-orcazap-customer-atualizar-${EnvAlias}'
+      CodeUri: ../src/orcazap.customer.atualizar/
+      Handler: customer.atualizar::orcazap.customer.atualizar.Function::FunctionHandler
+      Events:
+        Api: { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Method: PUT, Path: '/api/customers/{id}' } }
+
+  CustomerRemoverFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lambda-orcazap-customer-remover-${EnvAlias}'
+      CodeUri: ../src/orcazap.customer.remover/
+      Handler: customer.remover::orcazap.customer.remover.Function::FunctionHandler
+      Events:
+        Api: { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Method: DELETE, Path: '/api/customers/{id}' } }
+
+  # Services
+  ServiceCriarFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lambda-orcazap-service-criar-${EnvAlias}'
+      CodeUri: ../src/orcazap.service.criar/
+      Handler: service.criar::orcazap.service.criar.Function::FunctionHandler
+      Events:
+        Api: { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Method: POST, Path: /api/services } }
+
+  ServiceListarFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lambda-orcazap-service-listar-${EnvAlias}'
+      CodeUri: ../src/orcazap.service.listar/
+      Handler: service.listar::orcazap.service.listar.Function::FunctionHandler
+      Events:
+        Api: { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Method: GET, Path: /api/services } }
+
+  ServiceConsultarFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lambda-orcazap-service-consultar-${EnvAlias}'
+      CodeUri: ../src/orcazap.service.consultar/
+      Handler: service.consultar::orcazap.service.consultar.Function::FunctionHandler
+      Events:
+        Api: { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Method: GET, Path: '/api/services/{id}' } }
+
+  ServiceAtualizarFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lambda-orcazap-service-atualizar-${EnvAlias}'
+      CodeUri: ../src/orcazap.service.atualizar/
+      Handler: service.atualizar::orcazap.service.atualizar.Function::FunctionHandler
+      Events:
+        Api: { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Method: PUT, Path: '/api/services/{id}' } }
+
+  ServiceRemoverFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lambda-orcazap-service-remover-${EnvAlias}'
+      CodeUri: ../src/orcazap.service.remover/
+      Handler: service.remover::orcazap.service.remover.Function::FunctionHandler
+      Events:
+        Api: { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Method: DELETE, Path: '/api/services/{id}' } }
+
+  # Quotes
+  QuoteCriarFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lambda-orcazap-quote-criar-${EnvAlias}'
+      CodeUri: ../src/orcazap.quote.criar/
+      Handler: quote.criar::orcazap.quote.criar.Function::FunctionHandler
+      Events:
+        Api: { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Method: POST, Path: /api/quotes } }
+
+  QuoteListarFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lambda-orcazap-quote-listar-${EnvAlias}'
+      CodeUri: ../src/orcazap.quote.listar/
+      Handler: quote.listar::orcazap.quote.listar.Function::FunctionHandler
+      Events:
+        Api: { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Method: GET, Path: /api/quotes } }
+
+  QuoteConsultarFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lambda-orcazap-quote-consultar-${EnvAlias}'
+      CodeUri: ../src/orcazap.quote.consultar/
+      Handler: quote.consultar::orcazap.quote.consultar.Function::FunctionHandler
+      Events:
+        Api: { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Method: GET, Path: '/api/quotes/{id}' } }
+
+  QuoteAtualizarStatusFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lambda-orcazap-quote-atualizar-status-${EnvAlias}'
+      CodeUri: ../src/orcazap.quote.atualizar.status/
+      Handler: quote.atualizar.status::orcazap.quote.atualizar.status.Function::FunctionHandler
+      Events:
+        Api: { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Method: PUT, Path: '/api/quotes/{id}/status' } }
+
+  QuoteRemoverFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lambda-orcazap-quote-remover-${EnvAlias}'
+      CodeUri: ../src/orcazap.quote.remover/
+      Handler: quote.remover::orcazap.quote.remover.Function::FunctionHandler
+      Events:
+        Api: { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Method: DELETE, Path: '/api/quotes/{id}' } }
+
+  QuoteWhatsAppLinkFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lambda-orcazap-quote-whatsapp-link-${EnvAlias}'
+      CodeUri: ../src/orcazap.quote.whatsapp.link/
+      Handler: quote.whatsapp.link::orcazap.quote.whatsapp.link.Function::FunctionHandler
+      Events:
+        Api: { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Method: GET, Path: '/api/quotes/{id}/whatsapp-link' } }
+
+Outputs:
+  ApiUrl:
+    Description: Base da API (vira VITE_API_URL no build do front).
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com'
+  FrontendUrl:
+    Value: !Sub 'https://${FrontendDistribution.DomainName}'
+  FrontendBucketName:
+    Value: !Ref FrontendBucket
+  FrontendDistributionId:
+    Value: !Ref FrontendDistribution
+  DatabaseEndpoint:
+    Value: !GetAtt Database.Endpoint.Address

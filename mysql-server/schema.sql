@@ -1,7 +1,7 @@
 CREATE DATABASE IF NOT EXISTS orcazap CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE orcazap;
 
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     name VARCHAR(150) NOT NULL,
     email VARCHAR(150) NOT NULL UNIQUE,
@@ -9,7 +9,7 @@ CREATE TABLE users (
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE customers (
+CREATE TABLE IF NOT EXISTS customers (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     user_id BIGINT NOT NULL,
     name VARCHAR(150) NOT NULL,
@@ -19,7 +19,7 @@ CREATE TABLE customers (
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
-CREATE TABLE services (
+CREATE TABLE IF NOT EXISTS services (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     user_id BIGINT NOT NULL,
     name VARCHAR(150) NOT NULL,
@@ -29,7 +29,7 @@ CREATE TABLE services (
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
-CREATE TABLE quotes (
+CREATE TABLE IF NOT EXISTS quotes (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     user_id BIGINT NOT NULL,
     customer_id BIGINT NOT NULL,
@@ -41,7 +41,7 @@ CREATE TABLE quotes (
     FOREIGN KEY (customer_id) REFERENCES customers(id)
 );
 
-CREATE TABLE quote_items (
+CREATE TABLE IF NOT EXISTS quote_items (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     quote_id BIGINT NOT NULL,
     service_id BIGINT,
